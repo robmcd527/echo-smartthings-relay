@@ -138,13 +138,17 @@ function setSwitchStatus(intent, session, alexaCB) {
     var shouldEndSession = true;
     var speechOutput = '';  //"Action is " + actionSlot.value + " and switch name is " + switchNameSlot.value;
     
-    console.log("Detected intent to toggle a switch - switch: " + switchNameSlot.value + " action: " + actionSlot.value);
+    console.log("Detected intent to toggle a switch - switch: " + switchNameSlot.value + " action: " + 
+        actionSlot.value);
     
+    // Use async to tame some of the nested callbacks
     async.waterfall(
         [
+            // First do some basic error checking and grab the oauth token
             function(callback) {
                 if (! (actionSlot.value === 'on' || actionSlot.value === 'off') ) {
-                    callback(true, "Sorry, I can only turn devices on or off.  It sounds like you asked me to turn something " + actionSlot.value);
+                    callback(true, "Sorry, I can only turn devices on or off.  It sounds like you asked me to turn " + 
+                        "something " + actionSlot.value);
                     return;
                 }
                 
@@ -161,47 +165,55 @@ function setSwitchStatus(intent, session, alexaCB) {
                 };
                 
                 console.log("Decrypting token using KMS...");
-                kms.decrypt(params, callback)
+                kms.decrypt(params, function(err, data) {
+                    if (err) {
+                        console.log("Error decrypting token: " + data);
+                        callback('ERROR', "Unable to decrypt token using KMS");
+                    }
+                    else {
+                        var smartThingsToken = data['Plaintext'].toString();
+                        console.log("Successfully decrypted smartthings API token.");
+                        callback(null, smartThingsToken);
+                    }
+                })
             },
-            function(data, callback) {
-                var smartThingsToken = data['Plaintext'].toString();
-                console.log("Successfully decrypted smartthings API token.  Moving on to get devices from ST...");
-                callback(null, smartThingsToken);
-            },
+            // Go grab the list of devices and pass that down
             getSwitchInformation,
+            // Try to figure out which device we want to work with
             function(oauthToken, data, callback) {
                 // Load the device that is the closest match to the requested name
                 var device = findClosestMatchingDevice(data, switchNameSlot.value);
                     
                 // Null return value means none of the devices we loaded were similar enough
                 if (null == device) {
-                    callback(true, "Unable to locate device with a name similar to " + switchNameSlot.value + ". Please try again.");
+                    callback('WARN', "Unable to locate device with a name similar to " + switchNameSlot.value + 
+                        ". Please try again.");
                     return;
                 }
                     
                 // Don't try to turn on a device that is already on
                 if (device.value === actionSlot.value) {
-                    callback(true, "Looks like the " + device.name + " is already " + actionSlot.value);
+                    callback('INFO', "Looks like the " + device.name + " is already " + actionSlot.value);
                     return;
                 }
                 
                 callback(null, oauthToken, device.id, actionSlot.value);
             },
+            // Finally actually flip the switch
             toggleSwitch
         ],
         function(err, data) {
             if (err) {
-                console.log("ERROR: " + data);
+                console.log(err + ": " + data);
                 speechOutput = data;
             }
             else {
-                console.log("Successfully finished processing. Initiating callback to Alexa...");
+                console.log("Successfully finished processing - Initiating callback to Alexa.");
             }
             alexaCB(sessionAttributes,
                 buildSpeechletResponse(cardTitle, speechOutput, repromptText, shouldEndSession));
         }
     );  
-
 }
 
 /**
@@ -251,7 +263,8 @@ function findClosestMatchingDevice(deviceList, deviceName) {
         }
     }
     else {
-        console.log("Fuzzy matching found " + matchName + " but score of " + matchScore + " is below threshold of " + fuzzyThreshold);
+        console.log("Fuzzy matching found " + matchName + " but score of " + matchScore + " is below threshold of " + 
+            fuzzyThreshold);
     }
     
     return null;
@@ -297,7 +310,8 @@ function toggleSwitch(oauthToken, deviceId, action, callback) {
         },
         function (error, response, body) {
             if (error) {
-                console.log("Error changing switch status for deviceId " + deviceId + " to status " + action + "! Response: " + response + "\n" + body);
+                console.log("Error changing switch status for deviceId " + deviceId + " to status " + action + 
+                    "! Response: " + response + "\n" + body);
                 callback(error, "Error changing status of switch through service");
             }
             else {
