@@ -323,6 +323,19 @@ function setSwitchStatus(intent, session, alexaCB) {
     console.log("Detected intent to toggle a switch - switch: " + switchNameSlot.value + " action: " + 
         actionSlot.value);
     
+    // Create the last callback so we can short-circuit
+    var endCallback = function(err, data) {
+        if (err) {
+            console.log(err + ": " + data);
+            speechOutput = data;
+        }
+        else {
+            console.log("Successfully finished processing - Initiating callback to Alexa.");
+        }
+        alexaCB(sessionAttributes,
+            buildSpeechletResponse(cardTitle, speechOutput, repromptText, shouldEndSession));
+    };
+    
     // Use async to tame some of the nested callbacks
     async.waterfall(
         [
@@ -341,50 +354,101 @@ function setSwitchStatus(intent, session, alexaCB) {
                 
                 callback(null);
             },
-            // Grab the oAuth token
-            getSmartThingsToken,
-            // Go grab the list of devices and pass that down
-            function(oauthToken, callback) {
-                getSwitchInformation(oauthToken, function(err, data) {
-                    callback(err, oauthToken, data);
-                });
-            },
-            // Try to figure out which device we want to work with
-            function(oauthToken, data, callback) {
-                // Load the device that is the closest match to the requested name
-                var device = findClosestMatch(data, switchNameSlot.value, 0.5, function(il) { return il.name; });
-                    
-                // Null return value means none of the devices we loaded were similar enough
-                if (null == device) {
-                    callback('WARN', "Unable to locate device with a name similar to " + switchNameSlot.value + 
-                        ". Please try again.");
-                    return;
-                }
-                    
-                // Don't try to turn on a device that is already on
-                if (device.name === actionSlot.value) {
-                    callback('INFO', "Looks like the " + device.name + " is already " + actionSlot.value);
-                    return;
-                }
+            // First get the configured groups
+            getSmartThingsGroups,
+            // See if the switch matches a group
+            function(data, callback) {
+                console.log("Searching for group called " + switchNameSlot.value + "...");
+                var group = findClosestMatch(data.Items, switchNameSlot.value, 0.9, 
+                    function(il) { return il.GroupName.S; });
                 
-                callback(null, oauthToken, device.id, actionSlot.value);
-            },
-            // Finally actually flip the switch
-            toggleSwitch
+                // If we didn't find a configured group we fall back to looking for a specific device
+                if (group == null) {
+                    console.log("Didn't find a matching group.  Proceeding to look for specific device...");
+                    async.waterfall(
+                        [
+                            // Grab the oAuth token
+                            getSmartThingsToken,
+                            // Go grab the list of devices and pass that down
+                            function(oauthToken, callback) {
+                                getSwitchInformation(oauthToken, function(err, data) {
+                                    callback(err, oauthToken, data);
+                                });
+                            },
+                            // Try to figure out which device we want to work with
+                            function(oauthToken, data, callback) {
+                                // Load the device that is the closest match to the requested name
+                                var device = findClosestMatch(data, switchNameSlot.value, 0.5, function(il) { return il.name; });
+                                    
+                                // Null return value means none of the devices we loaded were similar enough
+                                if (null == device) {
+                                    setSwitchStatus('WARN', "Unable to locate device with a name similar to " + switchNameSlot.value + 
+                                        ". Please try again.");
+                                    return;
+                                }
+                                    
+                                // Don't try to turn on a device that is already on
+                                if (device.name === actionSlot.value) {
+                                    callback('INFO', "Looks like the " + device.name + " is already " + actionSlot.value);
+                                    return;
+                                }
+                                
+                                callback(null, oauthToken, device.id, actionSlot.value);
+                            },
+                            // Finally actually flip the switch
+                            toggleSwitch
+                        ],
+                        // Drop back to the parent callback
+                        callback
+                    );
+                }
+                // If we did find a group then we try to operate on that
+                else {
+                    console.log(group);
+                    console.log("Found group " + group.GroupName.S + " with ID " + group.GroupID.S);
+                    
+                    async.waterfall(
+                        [
+                            // Get the devices that are part of the group
+                            function(callback) {
+                                getSmartThingsDeviceMappings(group.GroupID.S, function(err, data) {
+                                    callback(err, data);
+                                });
+                            },
+                            // Turn device list into a query string
+                            function(deviceData, callback) {
+                                if (deviceData.Items.size == 0) {
+                                    callback('ERROR', "That device group has no devices!");
+                                    return;
+                                }
+                                
+                                console.log("Successfully loaded " + deviceData.Items.length + " devices...");
+                                
+                                // Create query string
+                                var deviceListString = deviceData.Items.map(function(obj) { return obj.DeviceID.S; }).join(',');
+                                
+                                console.log("Created query string: " + deviceListString);
+                                callback(null, deviceListString);
+                            },
+                            // Get the oauth token
+                            function(deviceListString, callback) {
+                                getSmartThingsToken(function(err, data) {
+                                    callback(err, data, deviceListString, actionSlot.value); 
+                                });
+                            },
+                            // Game Time
+                            toggleSwitch
+                        ],
+                        // Drop back to the parent callback
+                        callback
+                    );
+                }
+            }
         ],
-        function(err, data) {
-            if (err) {
-                console.log(err + ": " + data);
-                speechOutput = data;
-            }
-            else {
-                console.log("Successfully finished processing - Initiating callback to Alexa.");
-            }
-            alexaCB(sessionAttributes,
-                buildSpeechletResponse(cardTitle, speechOutput, repromptText, shouldEndSession));
-        }
+        endCallback
     );  
 }
+
 
 /**
  * This method takes the structured list of data and tries to find the item
@@ -462,6 +526,33 @@ function getSmartThingsGroups(callback) {
     });
 }
 
+
+/**
+ * Get the device mappings from Dynamo for a given groupId
+ */
+function getSmartThingsDeviceMappings(groupId, callback) {
+    console.log("Loading device mappings for groupId " + groupId);
+    
+    var params = {
+        'TableName': 'SmartThingsDeviceMappings',
+        'FilterExpression': 'GroupID = :gid',
+        'ExpressionAttributeValues': {
+            ':gid': {'S': groupId}
+        }
+    };
+    
+    dynamoDB.scan(params, function(err, data) {
+        if (err) {
+            console.log("Error loading device mappings from DynamoDB: " + err);
+            callback('Error', "Sorry, I was unable to load any devices for the group you requested.");
+        } 
+        else {
+            console.log("Successfully loaded device mappings for groupId " + groupId);
+            callback(null, data);
+        }
+    });
+}
+
 /**
  * Gets the SmartThings oAuth token from KMS
  */
@@ -532,7 +623,7 @@ function toggleSwitch(oauthToken, deviceId, action, callback) {
                 callback(error, "Error changing status of switch through service");
             }
             else {
-                console.log("Successfully changed status of " + deviceId + " to " + action + ": " + body);
+                console.log("Successfully changed status of " + deviceId + " to " + action);
                 callback(null, null);
             }
         }
