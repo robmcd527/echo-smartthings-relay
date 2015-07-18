@@ -354,7 +354,7 @@ function setSwitchStatus(intent, session, alexaCB) {
                 
                 callback(null);
             },
-            // First get the configured groups
+            // Then get the configured groups
             getSmartThingsGroups,
             // See if the switch matches a group
             function(data, callback) {
@@ -382,7 +382,7 @@ function setSwitchStatus(intent, session, alexaCB) {
                                     
                                 // Null return value means none of the devices we loaded were similar enough
                                 if (null == device) {
-                                    setSwitchStatus('WARN', "Unable to locate device with a name similar to " + switchNameSlot.value + 
+                                    callback('WARN', "Unable to locate device with a name similar to " + switchNameSlot.value + 
                                         ". Please try again.");
                                     return;
                                 }
@@ -454,7 +454,8 @@ function setSwitchStatus(intent, session, alexaCB) {
  * This method takes the structured list of data and tries to find the item
  * that matches most clostly.  It first looks for any exact matches and then 
  * tries to do a fuzzy string match in case Echo interpreted something a 
- * little off.  Returns null if we don't find a good match.
+ * little off.  It takes a custom accessor function to allow the input list to
+ * be a list of objects.  Returns null if we don't find a good match.
  * 
  * Reference: https://www.npmjs.com/package/fuzzyset.js
  */
